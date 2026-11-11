@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use sqlx::PgPool;
 
-use crate::{egestor::EgestorClient, error::AppError, trello::TrelloClient};
+use crate::{egestor::EgestorClient, error::AppError, sincronizacao::Hub, trello::TrelloClient};
 
 /// Estado compartilhado entre todas as rotas via `axum::extract::State`.
 /// Clonar é barato: só `Arc`s e o `PgPool` (que já é um `Arc` por dentro).
@@ -13,6 +13,8 @@ pub struct AppState {
     pub egestor: Option<Arc<EgestorClient>>,
     pub trello: Option<Arc<TrelloClient>>,
     pub api_key: Option<Arc<str>>,
+    /// Avisos aos programas conectados e controle das sincronizações.
+    pub hub: Arc<Hub>,
 }
 
 impl AppState {

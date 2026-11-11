@@ -1,8 +1,11 @@
 //! Servidor geral da Biplas: fornece dados para os computadores da empresa
 //! e recebe dados de diversas fontes.
 //!
-//! - eGestor (ERP): gateway completo da API, em `/api/egestor/*`
-//! - Trello: quadro "Programação Máquinas", em `/api/trello/*`
+//! - Sincronização: busca eGestor e Trello, grava no PostgreSQL e avisa os
+//!   programas conectados (`/api/sync`, `/api/notificacoes`)
+//! - Dados gravados: `/api/dados/egestor/*`, `/api/trello/*`, `/api/panorama/*`
+//! - eGestor (ERP): gateway da API, em `/api/egestor/*` (para escrita e consultas
+//!   que não são sincronizadas)
 //! - PostgreSQL: armazenamento próprio (eventos recebidos de outras fontes)
 
 mod config;
@@ -10,15 +13,18 @@ mod db;
 mod egestor;
 mod error;
 mod routes;
+mod sincronizacao;
 mod state;
 mod trello;
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use axum::extract::DefaultBodyLimit;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-use crate::{config::Config, egestor::EgestorClient, state::AppState, trello::TrelloClient};
+use crate::{
+    config::Config, egestor::EgestorClient, sincronizacao::Hub, state::AppState, trello::TrelloClient,
+};
 
 #[tokio::main]
 async fn main() {
@@ -72,7 +78,32 @@ async fn main() {
         tracing::warn!("API_KEY não definida: /api está aberta para qualquer um na rede");
     }
 
-    let state = AppState { db, egestor, trello, api_key: config.api_key.as_deref().map(Arc::from) };
+    let state = AppState {
+        db,
+        egestor,
+        trello,
+        api_key: config.api_key.as_deref().map(Arc::from),
+        hub: Arc::new(Hub::default()),
+    };
+
+    // Sincronização automática (precisa do banco e da integração configurada).
+    if state.db.is_some() {
+        let agendas = [
+            (sincronizacao::EGESTOR, state.egestor.is_some(), config.sync_egestor_min),
+            (sincronizacao::TRELLO, state.trello.is_some(), config.sync_trello_min),
+        ];
+        for (fonte, configurada, minutos) in agendas {
+            match (configurada, minutos) {
+                (true, Some(m)) => {
+                    tracing::info!("Sincronização de {fonte}: agora e a cada {m} min");
+                    sincronizacao::agendar(state.clone(), fonte, Duration::from_secs(m * 60));
+                }
+                (true, None) => tracing::info!("Sincronização de {fonte}: só quando um programa pedir"),
+                (false, _) => {}
+            }
+        }
+    }
+    let hub = state.hub.clone();
 
     let app = routes::build(state)
         // Eleva o limite padrão (2 MB) para caber uploads de foto de produto
@@ -88,9 +119,10 @@ async fn main() {
     tracing::info!("🚀 biplas-server ouvindo em http://{}:{}", config.host, config.port);
 
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(async {
+        .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
             tracing::info!("Encerrando...");
+            hub.desligar();
         })
         .await
         .expect("erro fatal servindo requisições");

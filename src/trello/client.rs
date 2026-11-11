@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use reqwest::{Client, header::AUTHORIZATION};
 use serde::{Deserialize, de::DeserializeOwned};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 
 use super::model::slug;
 use crate::{config::TrelloConfig, error::AppError};
@@ -44,18 +44,8 @@ pub struct TrelloClient {
     /// `true` quando o ID veio do .env (não deve ser redescoberto pelo nome).
     board_id_fixed: bool,
     board_id: RwLock<Option<String>>,
-    /// Histórico de movimentações já baixado. Ações do Trello não mudam,
-    /// então cada chamada só busca as mais novas que a última em cache.
-    moves: Mutex<MovesCache>,
     /// Listas servidas, na ordem da resposta.
     lists: Vec<String>,
-}
-
-#[derive(Default)]
-struct MovesCache {
-    board_id: String,
-    /// Da mais nova para a mais antiga, como o Trello devolve.
-    actions: Vec<RawAction>,
 }
 
 impl TrelloClient {
@@ -73,20 +63,14 @@ impl TrelloClient {
             board_name: config.board_name.clone(),
             board_id_fixed: config.board_id.is_some(),
             board_id: RwLock::new(config.board_id.clone()),
-            moves: Mutex::default(),
             lists: config.lists.clone(),
         }
     }
 
-    /// Todas as vezes em que um cartão entrou numa lista do quadro, da mais
-    /// nova para a mais antiga.
-    pub async fn moves(&self, board_id: &str) -> Result<Vec<RawAction>, AppError> {
-        let mut cache = self.moves.lock().await;
-        if cache.board_id != board_id {
-            *cache = MovesCache { board_id: board_id.to_string(), actions: Vec::new() };
-        }
-
-        let since = cache.actions.first().map(|a| a.id.clone());
+    /// Vezes em que um cartão entrou numa lista do quadro depois da ação
+    /// `since` (todas, se `None`), da mais nova para a mais antiga. Ações do
+    /// Trello não mudam: quem chama guarda as já lidas e pede só as novas.
+    pub async fn moves(&self, board_id: &str, since: Option<&str>) -> Result<Vec<RawAction>, AppError> {
         let mut fresh: Vec<RawAction> = Vec::new();
         loop {
             let mut query = vec![
@@ -95,7 +79,7 @@ impl TrelloClient {
                 ("memberCreator", "false"),
                 ("limit", "1000"),
             ];
-            if let Some(since) = &since {
+            if let Some(since) = since {
                 query.push(("since", since));
             }
             let before = fresh.last().map(|a| a.id.clone());
@@ -108,16 +92,9 @@ impl TrelloClient {
             let done = page.len() < ACTIONS_PAGE;
             fresh.extend(page);
             if done {
-                break;
+                return Ok(fresh);
             }
         }
-
-        if !fresh.is_empty() {
-            tracing::info!("{} movimentação(ões) nova(s) no histórico", fresh.len());
-            fresh.append(&mut cache.actions);
-            cache.actions = fresh;
-        }
-        Ok(cache.actions.clone())
     }
 
     /// Busca o quadro configurado com listas, cartões, membros, checklists e

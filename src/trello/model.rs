@@ -2,12 +2,12 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
     error::AppError,
-    trello::client::{RawAction, RawBoard},
+    trello::client::RawBoard,
 };
 
 #[derive(Debug, Serialize)]
@@ -28,7 +28,7 @@ pub struct Lista {
     pub cartoes: Vec<Cartao>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Cartao {
     pub id: String,
     pub nome: String,
@@ -48,20 +48,20 @@ pub struct Cartao {
     pub campos: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Etiqueta {
     pub nome: String,
     pub cor: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Membro {
     pub id: String,
     pub nome: String,
     pub usuario: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Checklist {
     pub nome: String,
     pub total: usize,
@@ -69,7 +69,7 @@ pub struct Checklist {
     pub itens: Vec<ItemChecklist>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ItemChecklist {
     pub nome: String,
     pub concluido: bool,
@@ -91,25 +91,13 @@ pub struct CartaoOp {
     pub entradas: BTreeMap<String, String>,
 }
 
+/// Última entrada de cada cartão em cada lista: id do cartão → (slug da
+/// lista → data ISO 8601). Vem do histórico gravado no banco.
+pub type Entradas = HashMap<String, BTreeMap<String, String>>;
+
 /// Cartões do quadro com OPs, máquina e datas de entrada em cada lista.
 /// Os separadores "MAQUINA N" não entram na resposta.
-pub fn ops(quadro: Quadro, moves: &[RawAction]) -> Vec<CartaoOp> {
-    let slugs: HashMap<&str, &str> =
-        quadro.listas.iter().map(|l| (l.id.as_str(), l.slug.as_str())).collect();
-
-    // `moves` vem do mais novo para o mais antigo: a primeira entrada
-    // encontrada para cada lista é a mais recente.
-    let mut entries: HashMap<&str, BTreeMap<String, String>> = HashMap::new();
-    for action in moves {
-        let Some((card, list)) = action.entry() else { continue };
-        let Some(slug) = slugs.get(list) else { continue };
-        entries
-            .entry(card)
-            .or_default()
-            .entry((*slug).to_string())
-            .or_insert_with(|| action.date.clone());
-    }
-
+pub fn ops(quadro: Quadro, entradas: &Entradas) -> Vec<CartaoOp> {
     let mut out = Vec::new();
     for lista in &quadro.listas {
         let mut maquina = None;
@@ -125,7 +113,7 @@ pub fn ops(quadro: Quadro, moves: &[RawAction]) -> Vec<CartaoOp> {
                 lista: lista.nome.clone(),
                 slug: lista.slug.clone(),
                 maquina: maquina.clone(),
-                entradas: entries.get(c.id.as_str()).cloned().unwrap_or_default(),
+                entradas: entradas.get(&c.id).cloned().unwrap_or_default(),
             });
         }
     }
@@ -398,15 +386,17 @@ mod tests {
             ]
         }))
         .unwrap();
-        let moves: Vec<RawAction> = serde_json::from_value(serde_json::json!([
-            {"id": "a3", "date": "2026-10-03T10:00:00Z", "data": {"card": {"id": "c1"}, "listAfter": {"id": "l2"}}},
-            {"id": "a2", "date": "2026-10-02T10:00:00Z", "data": {"card": {"id": "c1"}, "listAfter": {"id": "l2"}}},
-            {"id": "a1", "date": "2026-10-01T10:00:00Z", "data": {"card": {"id": "c1"}, "list": {"id": "l1"}}}
-        ]))
-        .unwrap();
+        let entradas: Entradas = [(
+            "c1".to_string(),
+            BTreeMap::from([
+                ("em-andamento".to_string(), "2026-10-03T10:00:00Z".to_string()),
+                ("aguardando-maquina".to_string(), "2026-10-01T10:00:00Z".to_string()),
+            ]),
+        )]
+        .into();
 
         let quadro = build(raw, &["Aguardando Máquina".into(), "Em andamento".into()]).unwrap();
-        let ops = ops(quadro, &moves);
+        let ops = ops(quadro, &entradas);
         assert_eq!(ops.len(), 3);
         assert!(ops[0].ops.is_empty() && ops[0].maquina.is_none());
         assert_eq!(ops[1].ops, [10]);

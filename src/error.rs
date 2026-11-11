@@ -16,6 +16,9 @@ pub enum AppError {
     Upstream { servico: &'static str, erro: reqwest::Error },
     /// O Trello respondeu com status de erro.
     Trello { status: u16, body: String },
+    /// O eGestor respondeu com status de erro (só na sincronização; o proxy
+    /// repassa a resposta como veio).
+    Egestor { status: u16, body: String },
     /// Configuração inválida (ex.: quadro ou lista do Trello inexistente,
     /// falha ao autenticar no eGestor).
     Config(String),
@@ -54,6 +57,7 @@ impl std::fmt::Display for AppError {
                  Verifique TRELLO_KEY e TRELLO_TOKEN no .env."
             ),
             AppError::Trello { status, body } => write!(f, "o Trello respondeu {status}: {body}"),
+            AppError::Egestor { status, body } => write!(f, "o eGestor respondeu {status}: {body}"),
             AppError::NaoAutorizado => write!(f, "header x-api-key ausente ou inválido"),
             AppError::Database(e) => write!(f, "erro no banco de dados: {e}"),
             AppError::Config(msg)
@@ -70,7 +74,9 @@ impl std::error::Error for AppError {}
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = match &self {
-            AppError::Upstream { .. } | AppError::Trello { .. } => StatusCode::BAD_GATEWAY,
+            AppError::Upstream { .. } | AppError::Trello { .. } | AppError::Egestor { .. } => {
+                StatusCode::BAD_GATEWAY
+            }
             AppError::Indisponivel(_) => StatusCode::SERVICE_UNAVAILABLE,
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,

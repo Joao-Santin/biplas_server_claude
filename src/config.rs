@@ -14,6 +14,10 @@ pub struct Config {
     pub database_url: Option<String>,
     pub egestor: Option<EgestorConfig>,
     pub trello: Option<TrelloConfig>,
+    /// De quantos em quantos minutos o servidor sincroniza sozinho cada fonte
+    /// (`None` = só quando um programa pedir).
+    pub sync_egestor_min: Option<u64>,
+    pub sync_trello_min: Option<u64>,
 }
 
 pub struct EgestorConfig {
@@ -84,6 +88,8 @@ impl Config {
         };
 
         Ok(Self {
+            sync_egestor_min: minutos("SYNC_EGESTOR_MIN", 30)?,
+            sync_trello_min: minutos("SYNC_TRELLO_MIN", 5)?,
             host,
             port,
             api_key: optional("API_KEY"),
@@ -92,6 +98,15 @@ impl Config {
             trello,
         })
     }
+}
+
+/// Intervalo em minutos; 0 desliga a sincronização automática.
+fn minutos(name: &str, padrao: u64) -> Result<Option<u64>, String> {
+    let n = match optional(name) {
+        Some(v) => v.parse::<u64>().map_err(|_| format!("{name} inválido: \"{v}\" (use minutos; 0 desliga)"))?,
+        None => padrao,
+    };
+    Ok((n > 0).then_some(n))
 }
 
 fn optional(name: &str) -> Option<String> {

@@ -73,6 +73,34 @@ impl EgestorClient {
         Self::into_axum_response(resp).await
     }
 
+    /// Chamada JSON usada pela sincronização: devolve o status e o corpo já
+    /// decodificado (ou `Value::Null` se o corpo não for JSON). Renova o token
+    /// e repete uma vez em caso de 401, como o proxy.
+    pub async fn json(
+        &self,
+        method: Method,
+        upstream_path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<(u16, serde_json::Value), AppError> {
+        let mut headers = HeaderMap::new();
+        let bytes = match body {
+            Some(b) => {
+                headers.insert(CONTENT_TYPE, "application/json".parse().expect("header fixo"));
+                Bytes::from(serde_json::to_vec(b).expect("JSON serializável"))
+            }
+            None => Bytes::new(),
+        };
+        let token = self.auth.get_access_token().await?;
+        let mut resp = self.send(&token, method.clone(), upstream_path, None, &headers, bytes.clone()).await?;
+        if resp.status().as_u16() == 401 {
+            let fresh = self.auth.force_refresh().await?;
+            resp = self.send(&fresh, method, upstream_path, None, &headers, bytes).await?;
+        }
+        let status = resp.status().as_u16();
+        let corpo = resp.bytes().await.map_err(AppError::upstream("o eGestor"))?;
+        Ok((status, serde_json::from_slice(&corpo).unwrap_or(serde_json::Value::Null)))
+    }
+
     async fn send(
         &self,
         token: &str,

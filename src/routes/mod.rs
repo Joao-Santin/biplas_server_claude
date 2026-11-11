@@ -1,4 +1,6 @@
+mod dados;
 mod eventos;
+mod panorama;
 
 use axum::{
     Json, Router,
@@ -9,7 +11,7 @@ use axum::{
 };
 use serde_json::{Value, json};
 
-use crate::{egestor, error::AppError, state::AppState, trello};
+use crate::{egestor, error::AppError, sincronizacao, state::AppState, trello};
 
 /// Monta o Router final:
 ///
@@ -24,6 +26,9 @@ pub fn build(state: AppState) -> Router {
         .nest(egestor::PREFIX.trim_start_matches("/api"), egestor::router())
         .nest(trello::PREFIX.trim_start_matches("/api"), trello::router())
         .merge(eventos::router())
+        .merge(dados::router())
+        .merge(panorama::router())
+        .merge(sincronizacao::router())
         .route_layer(middleware::from_fn_with_state(state.clone(), exigir_api_key));
 
     Router::new()
