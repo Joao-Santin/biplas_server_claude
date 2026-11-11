@@ -1,5 +1,6 @@
 mod dados;
 mod eventos;
+pub mod historico;
 mod panorama;
 
 use axum::{
@@ -28,6 +29,7 @@ pub fn build(state: AppState) -> Router {
         .merge(eventos::router())
         .merge(dados::router())
         .merge(panorama::router())
+        .merge(historico::router())
         .merge(sincronizacao::router())
         .route_layer(middleware::from_fn_with_state(state.clone(), exigir_api_key));
 

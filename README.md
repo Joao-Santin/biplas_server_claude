@@ -39,17 +39,25 @@ opcional: o que não estiver configurado responde `503` explicando o que falta.
 | `POST /api/sync/{egestor|trello}` | Pede uma sincronização agora (responde 202 na hora; se já estiver rodando, não começa outra) |
 | `GET /api/notificacoes` | Server-Sent Events. Cada `data:` é um JSON com `tipo`: `conectado` (recarregue tudo), `atrasado` (idem), `sync` (`fonte`, `estado` andamento/concluido/erro, `etapa`, `fracao`, `erro`) ou `dados` (`recurso`, `origem` = `x-cliente-id` de quem mudou) |
 | `GET /api/dados/egestor/{recurso}` | Dados gravados do eGestor, JSON original de cada registro: `produtos`, `categorias`, `composicoes` (uma linha por produto), `producao` (`?abertas=true` = só as OPs em aberto) |
-| `GET|PUT /api/panorama/colunas/{necessidades|produtos}` | Colunas do Panorama de Injetados (`{"colunas": [...]}`; `null` = padrão) |
+| `GET|PUT /api/panorama/colunas/{necessidades|produtos}` | Colunas do Panorama de Injetados de quem pede (pelo `x-usuario`; sem ele, pela máquina). `{"colunas": [["Material", true], ...], "cores": [["Material", {"fundo": "#RRGGBB", "texto": "#RRGGBB"}], ...]}` (`cores` é opcional); quem nunca configurou recebe a configuração comum de antes, ou `null` = padrão |
 | `GET|POST /api/panorama/simulacoes`, `DELETE /api/panorama/simulacoes/{id}` | Simulações (`{"cod_produto","quantidade"}`) |
-| `GET|PUT /api/panorama/parciais`, `DELETE /api/panorama/parciais/{op}/{linha}/{cod_produto}` | Realizado parcial das OPs (`{"op","linha","cod_produto","realizado"}`) |
+| `GET|PUT /api/panorama/parciais`, `DELETE /api/panorama/parciais/{op}/{linha}/{cod_produto}` | Realizado parcial das OPs (`{"op","linha","cod_produto","realizado","grupos": [{"volumes","qtd_volume"}, ...]}`; o realizado é sempre o total da linha, e com `grupos` o servidor o recalcula como a soma de volumes × qtd_volume) |
+| `GET /api/panorama/parciais/lancamentos?op=` | Cada confirmação de realizado da OP, com o total novo e o anterior (para mostrar quanto entrou de cada vez) |
 | `/api/egestor/{recurso}` | Gateway direto da API do eGestor (para gravar no ERP ou consultar o que não é sincronizado): `/api/egestor/X` → `/v1/X`. Métodos, filtros (query), corpo e resposta passam sem alteração (inclui XML/PDF e multipart). Tabela de rotas em `src/egestor/mod.rs`. |
 | `GET /api/trello/cartoes` | Quadro com as listas configuradas e seus cartões (do banco) |
 | `GET /api/trello/listas/{lista}` | Uma lista: `aguardando-maquina`, `em-andamento`, `concluido` |
-| `GET /api/trello/ops` | Cada cartão com OPs do título, máquina e entrada em cada lista |
+| `GET /api/trello/ops` | Cada cartão com OPs do título, máquina, etiquetas e entrada em cada lista |
+| `GET /api/historico?usuario=&programa=&antes_de=&limite=100` | Ações dos usuários (realizado parcial, simulações, pedidos de sincronização, colunas), mais recentes primeiro |
+| `GET /api/historico/usuarios?programa=` | Nomes de usuário que aparecem no histórico |
+| `GET /api/clientes?programa=` | Programas abertos agora (conectados em `/api/notificacoes`), com usuário, máquina e IP |
 | `GET /api/fontes` | Fontes de dados cadastradas |
 | `POST /api/eventos/{fonte}?tipo=...` | Recebe qualquer JSON de uma fonte e guarda no banco (a fonte é cadastrada no primeiro envio) |
 | `GET /api/eventos?fonte=&tipo=&pendentes=true&limite=50` | Eventos recebidos, mais recentes primeiro |
 | `PUT /api/eventos/{id}/processado` | Marca como processado; corpo opcional `{"erro": "..."}` |
+
+Os programas se identificam nos headers `x-programa`, `x-usuario` e
+`x-maquina` (percent-encoding UTF-8: "João" → `Jo%C3%A3o`), além do
+`x-cliente-id`. É o que aparece no histórico e em `/api/clientes`.
 
 Exemplos:
 
@@ -96,7 +104,9 @@ Tabelas:
 - `trello_quadro`, `trello_listas`, `trello_cartoes`: foto atual do quadro;
   `trello_movimentos`: histórico de entradas em listas (só cresce; a cada vez
   baixa apenas as ações novas).
-- `panorama_colunas`, `panorama_simulacoes`, `panorama_parciais`: dados do
+- `panorama_colunas_usuario` (colunas de cada usuário; `panorama_colunas` é a
+  configuração comum de antes, ponto de partida), `panorama_simulacoes`,
+  `panorama_parciais`: dados do
   Panorama de Injetados. Ao sincronizar o eGestor, os parciais de OPs que
   fecharam (ou de linhas que mudaram de produto) são apagados.
 

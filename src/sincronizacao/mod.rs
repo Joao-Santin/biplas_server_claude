@@ -15,7 +15,10 @@ pub mod trello;
 use std::{
     collections::HashMap,
     convert::Infallible,
-    sync::Mutex,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -32,7 +35,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, watch};
 
-use crate::{error::AppError, state::AppState};
+use crate::{error::AppError, routes::historico::Autor, state::AppState};
 
 pub const EGESTOR: &str = "egestor";
 pub const TRELLO: &str = "trello";
@@ -80,11 +83,21 @@ pub struct Andamento {
     pub fracao: f32,
 }
 
+/// Programa aberto agora: está conectado em `/api/notificacoes`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ClienteConectado {
+    #[serde(flatten)]
+    pub autor: Autor,
+    pub conectado_em: DateTime<Utc>,
+}
+
 /// Central de avisos e controle de quem está sincronizando.
 pub struct Hub {
     tx: broadcast::Sender<Notificacao>,
     em_andamento: Mutex<HashMap<&'static str, Andamento>>,
     desligar: watch::Sender<bool>,
+    clientes: Mutex<HashMap<u64, ClienteConectado>>,
+    proximo_cliente: AtomicU64,
 }
 
 impl Default for Hub {
@@ -93,11 +106,40 @@ impl Default for Hub {
             tx: broadcast::channel(512).0,
             em_andamento: Mutex::default(),
             desligar: watch::channel(false).0,
+            clientes: Mutex::default(),
+            proximo_cliente: AtomicU64::new(1),
         }
     }
 }
 
+/// Mantém o programa na lista de conectados enquanto a conexão de avisos existir.
+struct Presenca {
+    hub: Arc<Hub>,
+    id: u64,
+}
+
+impl Drop for Presenca {
+    fn drop(&mut self) {
+        self.hub.clientes.lock().expect("lock").remove(&self.id);
+        self.hub.dados_mudaram("clientes", None);
+    }
+}
+
 impl Hub {
+    /// Programas conectados agora, do mais antigo para o mais novo.
+    pub fn clientes(&self) -> Vec<ClienteConectado> {
+        let mut lista: Vec<ClienteConectado> = self.clientes.lock().expect("lock").values().cloned().collect();
+        lista.sort_by_key(|c| c.conectado_em);
+        lista
+    }
+
+    fn entrar(self: &Arc<Self>, autor: Autor) -> Presenca {
+        let id = self.proximo_cliente.fetch_add(1, Ordering::Relaxed);
+        self.clientes.lock().expect("lock").insert(id, ClienteConectado { autor, conectado_em: Utc::now() });
+        self.dados_mudaram("clientes", None);
+        Presenca { hub: self.clone(), id }
+    }
+
     pub fn notificar(&self, n: Notificacao) {
         // Erro = ninguém conectado no momento; não é problema.
         let _ = self.tx.send(n);
@@ -243,12 +285,14 @@ pub fn router() -> Router<AppState> {
 /// o andamento chega por `/api/notificacoes`.
 async fn pedir(
     State(state): State<AppState>,
+    autor: Autor,
     Path(fonte): Path<String>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
     let Some(fonte) = FONTES.into_iter().find(|f| *f == fonte) else {
         return Err(AppError::NotFound(format!("Fonte \"{fonte}\" não é sincronizada. Use egestor ou trello.")));
     };
     let iniciada = disparar(&state, fonte)?;
+    crate::routes::historico::registrar(&state, &autor, "sync", json!({ "fonte": fonte, "iniciada": iniciada })).await;
     Ok((StatusCode::ACCEPTED, Json(json!({ "iniciada": iniciada, "em_andamento": true }))))
 }
 
@@ -310,9 +354,11 @@ fn evento(n: &Notificacao) -> Result<Event, Infallible> {
 
 /// GET /api/notificacoes — Server-Sent Events. Cada mensagem é um JSON com
 /// `tipo`: `conectado`, `atrasado`, `sync` ou `dados` (ver `Notificacao`).
-async fn notificacoes(State(state): State<AppState>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+/// Enquanto a conexão estiver aberta, o programa aparece em `GET /api/clientes`.
+async fn notificacoes(State(state): State<AppState>, autor: Autor) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     // Assina antes de tirar a foto do andamento, para não perder nada no meio.
     let rx = state.hub.tx.subscribe();
+    let presenca = state.hub.entrar(autor);
     let em_andamento: Vec<Notificacao> = {
         let m = state.hub.em_andamento.lock().expect("lock");
         m.iter()
@@ -339,5 +385,10 @@ async fn notificacoes(State(state): State<AppState>) -> Sse<impl Stream<Item = R
     let fim = async move {
         let _ = desligar.wait_for(|d| *d).await;
     };
-    Sse::new(inicio.chain(avisos).take_until(Box::pin(fim))).keep_alive(KeepAlive::default())
+    // A presença vive junto com o fluxo: quando a conexão cai, sai da lista.
+    let fluxo = inicio.chain(avisos).take_until(Box::pin(fim)).map(move |e| {
+        let _ = &presenca;
+        e
+    });
+    Sse::new(fluxo).keep_alive(KeepAlive::default())
 }

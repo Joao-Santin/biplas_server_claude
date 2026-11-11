@@ -48,7 +48,7 @@ pub struct Cartao {
     pub campos: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Etiqueta {
     pub nome: String,
     pub cor: Option<String>,
@@ -89,6 +89,8 @@ pub struct CartaoOp {
     pub maquina: Option<String>,
     /// Slug da lista → última vez (ISO 8601, UTC) em que o cartão entrou nela.
     pub entradas: BTreeMap<String, String>,
+    /// Etiquetas do cartão (ex.: "Urgente", vermelha).
+    pub etiquetas: Vec<Etiqueta>,
 }
 
 /// Última entrada de cada cartão em cada lista: id do cartão → (slug da
@@ -114,6 +116,7 @@ pub fn ops(quadro: Quadro, entradas: &Entradas) -> Vec<CartaoOp> {
                 slug: lista.slug.clone(),
                 maquina: maquina.clone(),
                 entradas: entradas.get(&c.id).cloned().unwrap_or_default(),
+                etiquetas: c.etiquetas.clone(),
             });
         }
     }
@@ -379,7 +382,8 @@ mod tests {
             "lists": [{"id": "l1", "name": "Aguardando Máquina"}, {"id": "l2", "name": "Em andamento"}],
             "cards": [
                 {"id": "s1", "name": "MAQUINA 1", "idList": "l2", "pos": 1},
-                {"id": "c1", "name": "A (OP-10)", "idList": "l2", "pos": 2},
+                {"id": "c1", "name": "A (OP-10)", "idList": "l2", "pos": 2,
+                 "labels": [{"name": "Urgente", "color": "red"}, {"color": "green"}]},
                 {"id": "s2", "name": "Máquina 2", "idList": "l2", "pos": 3},
                 {"id": "c2", "name": "B (OP-20)", "idList": "l2", "pos": 4},
                 {"id": "c3", "name": "C sem OP", "idList": "l1", "pos": 1}
@@ -404,6 +408,10 @@ mod tests {
         assert_eq!(ops[1].entradas["em-andamento"], "2026-10-03T10:00:00Z");
         assert_eq!(ops[1].entradas["aguardando-maquina"], "2026-10-01T10:00:00Z");
         assert_eq!(ops[2].maquina.as_deref(), Some("Máquina 2"));
+        assert_eq!(ops[1].etiquetas.len(), 2);
+        assert_eq!(ops[1].etiquetas[0].nome, "Urgente");
+        assert_eq!(ops[1].etiquetas[1].cor.as_deref(), Some("green"));
+        assert!(ops[2].etiquetas.is_empty());
     }
 
     #[test]
