@@ -133,6 +133,19 @@ fn por_codigo(itens: impl IntoIterator<Item = Value>) -> BTreeMap<i64, Value> {
     itens.into_iter().filter_map(|v| Some((v["codigo"].as_i64()?, v))).collect()
 }
 
+/// Troca o `estoque` de cada produto pelo do relatório "estoque do dia", que
+/// tem as casas decimais. Produto fora do relatório fica com o do cadastro.
+fn aplicar_estoque_do_dia(produtos: &mut BTreeMap<i64, Value>, linhas: &[Value]) {
+    for linha in linhas {
+        let Some(cod) = inteiro(&linha["codigo"]) else { continue };
+        let e = &linha["estoque"];
+        let Some(estoque) = e.as_f64().or_else(|| e.as_str()?.trim().parse().ok()) else { continue };
+        if let Some(p) = produtos.get_mut(&cod) {
+            p["estoque"] = json!(estoque);
+        }
+    }
+}
+
 /// Produtos e insumos citados nas OPs.
 fn citados_nas_ops(ops: &[Value]) -> Vec<i64> {
     let mut codigos: Vec<i64> = ops
@@ -205,6 +218,24 @@ pub async fn sincronizar(state: &AppState) -> Result<Value, AppError> {
             produtos.insert(cod, v);
         }
     }
+
+    // O cadastro de produtos traz o estoque truncado (516,9 vem como 516); o
+    // relatório "estoque do dia" traz o valor com as casas decimais (95%).
+    prog("Lendo estoque do dia...".into(), 0.95);
+    let filtros = json!({
+        "dia": chrono::Local::now().format("%Y-%m-%d").to_string(),
+        "categoria": "",
+        "tags": "",
+        "semExcluidos": false,
+        "semEstNaoControl": false,
+        "mostrarEstoqueNegativo": true,
+        "mostrarCodProprio": false,
+        "apresentarArquivados": true,
+    });
+    let Value::Array(linhas) = c.sucesso(Method::POST, "/v1/relatorios/estoqueDoDia", Some(&filtros)).await? else {
+        return Err(AppError::Internal("O relatório de estoque do dia do eGestor não devolveu uma lista".into()));
+    };
+    aplicar_estoque_do_dia(&mut produtos, &linhas);
 
     // OPs que estavam em aberto e saíram da lista: guarda como ficaram (95% – 98%).
     let sairam: Vec<i64> = sqlx::query_scalar("SELECT codigo FROM egestor_producao WHERE aberta AND NOT (codigo = ANY($1))")
@@ -336,5 +367,26 @@ mod tests {
             json!({"produtos": [{"codProduto": 1, "insumos": []}]}),
         ];
         assert_eq!(citados_nas_ops(&ops), [1, 3, 9]);
+    }
+
+    #[test]
+    fn estoque_do_dia_traz_as_casas_decimais() {
+        let mut produtos = por_codigo([
+            json!({"codigo": 64, "estoque": 516}),
+            json!({"codigo": 65, "estoque": 10}),
+            json!({"codigo": 66, "estoque": 3}),
+        ]);
+        aplicar_estoque_do_dia(
+            &mut produtos,
+            &[
+                json!({"codigo": 64, "estoque": 516.9}),
+                json!({"codigo": "65", "estoque": "-2.125"}),
+                json!({"codigo": 999, "estoque": 1}),
+            ],
+        );
+        assert_eq!(produtos[&64]["estoque"], json!(516.9));
+        assert_eq!(produtos[&65]["estoque"], json!(-2.125));
+        assert_eq!(produtos[&66]["estoque"], json!(3));
+        assert!(!produtos.contains_key(&999));
     }
 }
